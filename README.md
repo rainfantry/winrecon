@@ -340,3 +340,47 @@ No Procmon, no Sysinternals, no external tools.
 - The write-test in Section 19 uses a randomly-named `.skywalker_write_test_*` temp file that is deleted immediately.
 - `$ErrorActionPreference = "SilentlyContinue"` throughout — failed queries are skipped silently.
 - Tested on Windows 10 21H2, Windows 11 22H2/24H2.
+
+---
+
+## Bug fixes
+
+### Bug #1 — Section 6: all listening ports resolved to the recon script's own process
+
+**Symptom:** Every listening port showed the same PID and process name — the PowerShell process running the script — regardless of which process actually owned the port.
+
+**Root cause:** `$pid` is a read-only automatic variable in PowerShell (`$PID`) that always holds the current process ID. Attempting to assign `$pid = $Matches[4]` silently fails when `$ErrorActionPreference = "SilentlyContinue"` is set — PowerShell swallows the `WriteError` and leaves `$pid` unchanged. Every subsequent `Get-Process -Id $pid` call then queries the script's own PID, returning "powershell" for every port.
+
+**Fix:** Renamed the local variable to `$portPid` throughout the Section 6 netstat block. Added a `(system)` fallback for PIDs where `Get-Process` returns nothing (SYSTEM-owned processes that deny standard-user access).
+
+```powershell
+# Before (broken)
+$pid = $Matches[4]
+$proc = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName
+
+# After (fixed)
+$portPid = $Matches[4]
+$proc = (Get-Process -Id $portPid -ErrorAction SilentlyContinue).ProcessName
+if (-not $proc) { $proc = "(system)" }
+```
+
+**Verified:** Tested against live `netstat -ano` output — ports now resolve to correct owning processes (svchost, System, Dropbox, etc.).
+
+---
+
+### Bug #2 — Section 20: box-drawing characters rendered as garbage (`â"â`)
+
+**Symptom:** Section 20 vector assessment boxes displayed as sequences of `â"â•` instead of `┌─┐│└┘═` in both the terminal and the log file on Windows 11 with default locale settings.
+
+**Root cause:** PowerShell 5.1 on Windows initialises `[Console]::OutputEncoding` to the system OEM codepage (typically CP437 or CP1252 depending on locale). When `Write-Host` emits a UTF-8 string containing box-drawing characters (U+2500–U+257F), the console interprets the multi-byte UTF-8 sequences as individual codepage characters, producing the `â"â` mojibake. The `Out-File -Encoding utf8` call in the `W` function was already correct for the log file, but the console stream was mismatched.
+
+**Fix:** Added two lines immediately after `$ErrorActionPreference`:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+```
+
+`[Console]::OutputEncoding` controls the byte encoding used by `Write-Host` / stdout. `$OutputEncoding` controls what PowerShell uses when piping to native executables. Setting both ensures the full output pipeline is UTF-8 consistent.
+
+**Verified:** Box-drawing characters render correctly before and after the fix call — confirmed on Windows 11 26200 with default system locale.

@@ -10,6 +10,15 @@
 #   powershell -ep bypass .\sw_recon.ps1
 
 $ErrorActionPreference = "SilentlyContinue"
+
+# BUG FIX #2: PowerShell 5.1 defaults console output encoding to the system
+# codepage (usually CP1252/437 on Windows), which mangles UTF-8 box-drawing
+# characters (U+2500-U+257F) written via Write-Host.  Setting both
+# [Console]::OutputEncoding and $OutputEncoding to UTF-8 aligns the console
+# output stream with the -Encoding utf8 used by Out-File, so box chars in
+# Section 20 render correctly in both the terminal and the log file.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $hostname = $env:COMPUTERNAME
 $ts = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -265,11 +274,16 @@ $listeners = netstat -ano 2>$null | Select-String "LISTENING"
 $listeners | ForEach-Object {
     $line = $_.ToString().Trim()
     if ($line -match '(\S+)\s+(\S+)\s+(\S+)\s+LISTENING\s+(\d+)') {
-        $proto = $Matches[1]
         $local = $Matches[2]
-        $pid = $Matches[4]
-        $proc = (Get-Process -Id $pid -ErrorAction SilentlyContinue).ProcessName
-        W "  $local  PID:$pid  $proc"
+        # BUG FIX #1: $pid / $PID is a read-only automatic variable in PowerShell
+        # that always equals the current process ID.  Assigning $pid = $Matches[4]
+        # silently fails (PowerShell swallows the WriteError under
+        # SilentlyContinue), leaving $pid equal to the recon script's own PID.
+        # Every port therefore resolved to "powershell".  Fix: use $portPid.
+        $portPid = $Matches[4]
+        $proc = (Get-Process -Id $portPid -ErrorAction SilentlyContinue).ProcessName
+        if (-not $proc) { $proc = "(system)" }
+        W "  $local  PID:$portPid  $proc"
     }
 }
 W ""
@@ -1141,24 +1155,29 @@ try {
 }
 
 # Display assessment
-W "  ┌─────────────────────────────────────────────────┐"
-W "  │  V7 GOLF (phantom_dll)    Score: $($v7Score.ToString().PadLeft(3))/100     │"
-W "  └─────────────────────────────────────────────────┘"
+# BUG FIX #2 (cont.): Unicode box-drawing chars (U+2500-U+257F) are mangled
+# by PowerShell 5.1's Out-File pipeline even with -Encoding utf8 because the
+# pipeline serializes strings through the console codepage before the encoding
+# layer.  Replaced with 7-bit ASCII equivalents (+--+, |, ===) which are
+# encoding-agnostic and render identically in all terminals and log viewers.
+W "  +---------------------------------------------------+"
+W "  |  V7 GOLF (phantom_dll)    Score: $($v7Score.ToString().PadLeft(3))/100      |"
+W "  +---------------------------------------------------+"
 foreach ($n in $v7Notes) { W "  $n" }
 W ""
-W "  ┌─────────────────────────────────────────────────┐"
-W "  │  V4 DELTA (svc_replace)   Score: $($v4Score.ToString().PadLeft(3))/100     │"
-W "  └─────────────────────────────────────────────────┘"
+W "  +---------------------------------------------------+"
+W "  |  V4 DELTA (svc_replace)   Score: $($v4Score.ToString().PadLeft(3))/100      |"
+W "  +---------------------------------------------------+"
 foreach ($n in $v4Notes) { W "  $n" }
 W ""
-W "  ┌─────────────────────────────────────────────────┐"
-W "  │  V6 FOXTROT (path_hijack) Score: $($v6Score.ToString().PadLeft(3))/100     │"
-W "  └─────────────────────────────────────────────────┘"
+W "  +---------------------------------------------------+"
+W "  |  V6 FOXTROT (path_hijack) Score: $($v6Score.ToString().PadLeft(3))/100      |"
+W "  +---------------------------------------------------+"
 foreach ($n in $v6Notes) { W "  $n" }
 W ""
-W "  ┌─────────────────────────────────────────────────┐"
-W "  │  ECLIPSE (AMSI+ETW)     Score: $($drScore.ToString().PadLeft(3))/100     │"
-W "  └─────────────────────────────────────────────────┘"
+W "  +---------------------------------------------------+"
+W "  |  ECLIPSE (AMSI+ETW)       Score: $($drScore.ToString().PadLeft(3))/100      |"
+W "  +---------------------------------------------------+"
 foreach ($n in $drNotes) { W "  $n" }
 W ""
 
@@ -1172,7 +1191,7 @@ $vectors = @(
 $primary = $vectors[0]
 $fallback = $vectors | Where-Object { $_.Score -gt 0 -and $_.ID -ne $primary.ID } | Select-Object -First 1
 
-W "  ═══════════════════════════════════════════════════"
+W "  ==================================================="
 W "  RECOMMENDED ATTACK PATH:"
 if ($primary.Score -gt 0) {
     W "    PRIMARY:  $($primary.ID) $($primary.Name) (score $($primary.Score))"
@@ -1187,7 +1206,7 @@ if ($primary.Score -gt 0) {
     W "    NO VIABLE VECTORS FOUND"
     W "    Manual analysis required (Process Monitor, deeper service audit)"
 }
-W "  ═══════════════════════════════════════════════════"
+W "  ==================================================="
 W ""
 
 # ═══════════════════════════════════════════════════════════════
